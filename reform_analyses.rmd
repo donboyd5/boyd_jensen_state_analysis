@@ -13,12 +13,15 @@ editor_options:
   chunk_output_type: console
 ---
 
+# SETUP
 ```{r setup, eval=TRUE, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
 
 # note that eval=TRUE unless set to FALSE
 
 knitr::opts_chunk$set(eval=TRUE, include=FALSE, echo = FALSE)
 options(width = 150)
+
+# usethis::use_github()
 
 ```
 
@@ -83,6 +86,7 @@ get_stname <- function(stabbr){
 ```
 
 
+# DATA PREPARATION
 ```{r get_reform_descriptions}
 url <- "https://docs.google.com/spreadsheets/d/1aEQlAV2I9HSnG00TEmjCE_Sj44vqLWIrXwbW0DTtID0/edit#gid=0"
 reform_descriptions <- read_sheet(url)
@@ -118,7 +122,7 @@ usweights %>%
   mutate(across(-filer2017, ~ifelse(is.na(filer2017), sum(.x, na.rm=TRUE), .x)))
 
 # create state weights for both sets of 2021 national weights
-stweights2021 <- usweights %>%
+stweights2021_all <- usweights %>%
   select(RECID, filer2017, WT2021, REWT2021) %>%
   pivot_longer(cols=c(WT2021, REWT2021),
                names_to = "wtype", values_to = "US") %>%
@@ -127,7 +131,7 @@ stweights2021 <- usweights %>%
 glimpse(stweights2021) # note that this gives us NA state weights for nonfilers; eventually we'll have nonfiler weights
 
 # verify that state weights sum to national weights for each record
-check <- stweights2021 %>%
+check <- stweights2021_all %>%
   filter(filer2017) %>%
   select(RECID, wtype, US, all_of(geos)) %>%
   pivot_longer(-c(RECID, wtype, US)) %>%
@@ -139,6 +143,10 @@ check <- stweights2021 %>%
 
 # Are any weights negative??
 # summary(stweights2021)  # no
+
+stweights2021 <- stweights2021_all %>%
+  filter(wtype=="REWT2021") %>%
+  select(-wtype)
 
 ```
 
@@ -204,48 +212,131 @@ get_wsums <- function(wstack){
     select(-c(RECID, filer2017, numret, 
               c00100, e00200, c18300, c04470, standard, 
               combined, iitax, agibase, xpinc, dispinc)) %>%
-  group_by(type, refnum, wtype, taxstatus, stubnum, stub) %>%
+  group_by(type, refnum, taxstatus, stubnum, stub) %>%
   summarise(across(.cols=everything(), sum), .groups="drop")
 }
 
 get_filersums <- function(wsums){
   
   wsums_long <- wsums %>%
-    pivot_longer(-c(type, refnum, wtype, taxstatus, stubnum, stub))
+    pivot_longer(-c(type, refnum, taxstatus, stubnum, stub),
+                 values_to = "wtdsum")
 
   # add in the all-stubs sum for each group
   stubsums <- wsums_long %>%
-    group_by(type, wtype, taxstatus, name) %>%
-    summarise(value=sum(value, na.rm=TRUE), .groups="drop") %>%
+    group_by(type, refnum, taxstatus, name) %>%
+    summarise(wtdsum=sum(wtdsum, na.rm=TRUE), .groups="drop") %>%
     mutate(stubnum=0, stub="Total")
   
   allsums1 <- wsums_long %>%
     mutate(stub=as.character(stub)) %>%
     bind_rows(stubsums) %>%
     separate(name, into=c("stabbr", "variable")) %>%
-    arrange(wtype, type, taxstatus, stabbr, variable, stubnum)
+    arrange(type, refnum, taxstatus, stabbr, variable, stubnum)
   
   # get an "all returns" category
   filersums <- allsums1 %>%
-    group_by(type, wtype, stabbr, variable, stub, stubnum) %>%
-    summarise(value=sum(value), .groups="drop") %>%
+    group_by(type, refnum, stabbr, variable, stub, stubnum) %>%
+    summarise(wtdsum=sum(wtdsum), .groups="drop") %>%
     mutate(taxstatus="allfilers") %>%
     bind_rows(allsums1) %>%
-    arrange(wtype, type, taxstatus, stabbr, variable)
+    arrange(type, taxstatus, stabbr, variable)
   
   filersums
 }
   
+get_xpinc <- function(filersums){
+  # create an "xpincxreform" concept - xpanded income minus the tax change
+  # for base it will be xpinc, but for reform it will be xpinc - iitax
+  xpincxreform <- filersums %>%
+    filter(variable %in% c("xpinc", "iitax")) %>%
+    pivot_wider(names_from = variable, values_from=wtdsum) %>%
+    group_by(taxstatus, stabbr, stub, stubnum) %>%
+    mutate(basetax=iitax[type=="base"],
+           basexpinc=xpinc[type=="base"],
+           xpincxreform=ifelse(type=="base", 
+                               xpinc, 
+                               basexpinc + basetax - iitax)) %>%
+    ungroup %>%
+    arrange(taxstatus, stabbr, stubnum, stub, type)
+  
+  # convert back to long
+  xpincxrlong <- xpincxreform %>%
+    select(type, refnum, stabbr, stub, stubnum, taxstatus, xpincxreform) %>%
+    pivot_longer(xpincxreform, names_to = "variable", values_to = "wtdsum")
+  
+  xpincxrlong
+}
+
+get_changes <- function(filersums, xpinc){
+  changes1 <- bind_rows(filersums, xpinc) %>%
+    group_by(type, refnum, taxstatus, stabbr, stub, stubnum) %>%
+    mutate(numret=wtdsum[variable=="numret"],
+           avgval=wtdsum / numret) %>%
+    ungroup
+
+  changes2 <- changes1 %>%
+    select(-refnum) %>%  # leave this off until I redefine it
+    pivot_longer(c(wtdsum, numret, avgval), names_to = "measure") %>%
+    pivot_wider(names_from=type, values_from=value) %>%
+    mutate(change=reform - base,
+           pchange=ifelse(base > 0, change / base, NA_real_))
+
+  # put US values on the file
+  changes <- changes2 %>%
+    left_join(changes2 %>% 
+                filter(stabbr=="US") %>% 
+                select(taxstatus, stubnum, stub, variable, measure, 
+                       us_base=base, us_reform=reform, us_change=change,
+                       us_pchange=pchange),
+              by=c("taxstatus", "stubnum", "stub", "variable", "measure"))
+  
+  changes
+}
 
 ```
 
 
-```{r}
+```{r get_usiitax_data}
+get_usiitax <- function(changes){
+  stiitax <- changes %>%
+    filter(measure %in% c("wtdsum", "avgval"),
+           variable %in% c("iitax", "dispinc")) %>%
+    select(variable, stabbr, taxstatus, stubnum, stub, measure,
+           base, reform, change, pchange) %>%
+    pivot_longer(-c(stabbr, taxstatus, stubnum, stub, variable, measure)) %>%
+    unite("name", c(measure, name)) %>%
+    pivot_wider() %>%
+    mutate(junk="") %>%
+    arrange(stubnum) %>%
+    select(variable, stabbr, taxstatus, stubnum, stub,
+           starts_with("wtdsum"), junk, starts_with("avg")) %>%
+    filter(variable=="iitax") %>%
+    select(-variable)
+
+  usiitax <- stiitax %>%
+    filter(stabbr=="US") %>%
+    select(taxstatus, stubnum, stub, 
+           starts_with("wtdsum"), junk, starts_with("avg"))
+  
+  usiitax
+}
+
+```
+
+
+
+```{r test}
 refnum <- 1
-reformdf <- get_reformdf(refnum)
-stack <- stack_files(basedf, reformdf)
-wstack <- weight_stack(stack)
-wsums <- get_wsums(wstack)
+reformdf <- get_reformdf(refnum)  # return-level data
+stack <- stack_files(basedf, reformdf)  # return-level data
+wstack <- weight_stack(stack)  # return-level data
+wsums <- get_wsums(wstack)  # summary data
+filersums <- get_filersums(wsums) # summary data
+xpinc <- get_xpinc(filersums)
+changes <- get_changes(filersums, xpinc)
+usiitax <- get_usiitax(changes)
+
 
 dim(wsums)
 
@@ -265,6 +356,205 @@ wsums %>% filter(wtype=="REWT2021", type=="base") %>% select(1:7)
 dim(wstack)
 glimpse(wstack) # ~1m recs, variables are weighted
 ns(wstack)
+
+summary(filersums)
+count(filersums, type)
+count(filersums, wtype)
+count(filersums, taxstatus)
+count(filersums, stubnum, stub)
+count(filersums, variable)
+count(filersums, stabbr)
+
+```
+
+# TABLES AND GRAPHS
+
+## National analysis
+
+```{r ustable, include=TRUE}
+
+reform_name <- reform_descriptions %>%
+  filter(number==refnum) %>% .$description
+
+# for this first US table we want all filers
+tabdata <- usiitax %>%
+  filter(taxstatus=="allfilers") %>%
+  select(-taxstatus)
+
+dcols <- c("wtdsum_base", "wtdsum_reform", "wtdsum_change", "avgval_base", "avgval_reform", "avgval_change")
+pcols <- c("wtdsum_pchange", "avgval_pchange")
+
+tab <- tabdata %>%
+  select(-stubnum) %>%
+  gt()  %>%  
+  tab_header(
+    title = paste0(reform_name, " compared to current 2021 law"),
+    subtitle = "Aggregate tax liabilities by income group ($ billions)"
+  ) %>%
+  cols_label(
+      stub = "",
+      wtdsum_base = "2021 current law",
+      wtdsum_reform = reform_name,
+      wtdsum_change = html("$ change: <br>Reform minus<br>current law"),
+      wtdsum_pchange = html("% change: <br>Reform versus<br>current law"),
+      
+      junk="",
+      
+      avgval_base = "2021 current law",
+      avgval_reform = reform_name,
+      avgval_change = html("$ change: <br>Reform minus<br>current law"),
+      avgval_pchange = html("% change: <br>Reform versus<br>current law")
+    ) %>%
+  
+  fmt_currency(
+    columns = all_of(str_subset(dcols, "wtdsum")),
+    rows=1,
+    decimals = 1,
+    scale_by = 1e-9,
+    suffixing = FALSE
+  )   %>%
+  fmt_currency(
+    columns = all_of(str_subset(dcols, "avgval")),
+    rows=1,
+    decimals = 0,
+    scale_by = 1,
+    suffixing = FALSE
+  )   %>%
+  fmt_number(
+    columns = all_of(str_subset(dcols, "wtdsum")),
+    rows=2:nrow(tabdata),
+    decimals = 1,
+    scale_by = 1e-9,
+    suffixing = FALSE
+  ) %>%
+  fmt_number(
+    columns = all_of(str_subset(dcols, "avgval")),
+    rows=2:nrow(tabdata),
+    decimals = 0,
+    scale_by = 1,
+    suffixing = FALSE
+  ) %>%
+  
+  fmt_percent(
+    columns = all_of(pcols),
+    decimals = 1
+  ) %>%
+  fmt_missing(
+    columns=all_of(pcols),
+    missing_text = "--") %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "#f7f7f7")
+    ),
+    locations = cells_body(
+      rows = seq(1, nrow(tabdata), 2)
+      )
+  ) %>%
+  tab_spanner(
+    label = html("Total impact in $ billions"),
+    columns = c("wtdsum_base", "wtdsum_reform", "wtdsum_change", "wtdsum_pchange",)
+  ) %>%
+  tab_spanner(
+    label = html("Average impact over all returns, in dollars"),
+    columns = c("avgval_base", "avgval_reform", "avgval_change", "avgval_pchange")
+  ) %>%
+  cols_width(
+    stub ~ px(150),
+    starts_with("wtd") ~ px(100),
+    junk ~ px(20),
+    starts_with("avg") ~ px(100),
+    everything() ~ px(60)
+  )
+
+tab
+
+# configure save settings for wide table
+refname <- paste0("reform", refnum)
+dir.create(file.path(here::here("results", refname)), showWarnings = FALSE)
+fname <- paste0(refname, "_USImpact_table.png")
+# zoom 2 default
+gtsave(tab, fname, path = here::here("results", refname), zoom=2, vwidth=1500)  
+
+
+```
+
+
+
+
+
+
+```{r rows.print=20}
+# data3 is the key result
+
+str(knitr::opts_chunk$get()) # default chunk options
+# opts_current$get()
+filersums  # "type"     "wtype"    "stubnum"  "stub"     "stabbr"   "variable" "value"  
+count(filersums, variable)
+
+# create an "xpincxreform" concept - xpanded income minus the tax change
+# for base it will be xpinc, but for reform it will be xpinc - iitax
+xpincxreform <- filersums %>%
+  filter(variable %in% c("xpinc", "iitax")) %>%
+  pivot_wider(names_from = variable) %>%
+  group_by(taxstatus, wtype, stabbr, stub, stubnum) %>%
+  mutate(basetax=iitax[type=="base"],
+         basexpinc=xpinc[type=="base"],
+         xpincxreform=ifelse(type=="base", 
+                             xpinc, 
+                             basexpinc + basetax - iitax)) %>%
+  ungroup %>%
+  arrange(taxstatus, wtype, stabbr, stubnum, stub, type)
+  
+xpincxreform %>% filter(stabbr=="NY", wtype=="REWT2021", stubnum >= 5, taxstatus=="taxpayer")
+
+# convert back to long
+xpincxrlong <- xpincxreform %>%
+  select(type, wtype, stabbr, stub, stubnum, taxstatus, xpincxreform) %>%
+  pivot_longer(xpincxreform, names_to = "variable")
+
+
+# create a file that has number of returns, value, and average value for each rec, with reweights
+data1 <- bind_rows(filersums, xpincxrlong) %>%
+  filter(wtype=="REWT2021") %>%
+  rename(wtdsum=value) %>%
+  group_by(type, wtype, taxstatus, stabbr, stub, stubnum) %>%
+  mutate(numret=wtdsum[variable=="numret"],
+         avgval=wtdsum / numret) %>%
+  ungroup
+
+
+data1 %>%
+  filter(stabbr=="MS", stubnum==0, variable=="iitax")
+
+data1 %>%
+  filter(stabbr=="NY", stubnum==0, variable=="xpinc")
+
+data1 %>%
+  filter(stabbr=="NY", stubnum==0, variable=="xpincxreform")
+
+data2 <- data1 %>%
+  pivot_longer(c(wtdsum, numret, avgval), names_to = "measure") %>%
+  pivot_wider(names_from=type, values_from=value) %>%
+  mutate(change=reform - base,
+         pchange=ifelse(base > 0, change / base, NA_real_))
+
+data2 %>%
+  filter(stabbr=="MS", stubnum==0, variable=="iitax")
+
+data2 %>%
+  filter(stabbr=="NY", stubnum==0, variable=="xpincxreform")
+
+data3 <- data2 %>%
+  left_join(data2 %>% 
+              filter(stabbr=="US") %>% 
+              select(wtype, taxstatus, stubnum, stub, variable, measure, 
+                     us_base=base, us_reform=reform, us_change=change, us_pchange=pchange),
+            by=c("wtype", "taxstatus", "stubnum", "stub", "variable", "measure"))
+
+
+data3 %>% filter(stabbr=="MS", stubnum==0, variable=="iitax")
+data3 %>% filter(stabbr=="MS", stubnum==0, variable=="dispinc")
+
 
 ```
 
