@@ -54,11 +54,16 @@ library(RColorBrewer)
 # SALTDIR <- r"(E:\pufanalysis_outputs\salt_tc3.2.1\)"
 WEIGHTDIR <- r"(E:\puf_analysis_inputs\weights\)"  
 REFDIR <- r"(E:\pufanalysis_outputs\reform_outputs\)"
+PUFDIR <- r"(E:\data\puf_files\puf_csv_related_files\PSL\2021-07-20\)"
 
 ```
 
 
 ```{r constants}
+BASEYEAR <- 2017
+DATAYEAR <- 2022
+REWTVAR <- paste0("REWT", DATAYEAR)
+
 geos <- c(state.abb, "other")
 
 # df with upper bound of open intervals (does not include endpoint on right)
@@ -85,8 +90,110 @@ get_stname <- function(stabbr){
 }
 ```
 
+# ONETIME DATA PREPARATION
+
+```{r ONETIME_prepare_usreweights}
+# create state weights for a different year; we want
+# RECID,filer2017,WT2017,WT2021,REWT2017, -- plus REWT2021, REWT2022, etc.
+
+# get my 2017 state weights
+stweights2017 <- read_csv(paste0(WEIGHTDIR, 'allweights2017_geo_restricted.csv')) %>%
+  mutate(RECID=as.integer(pid + 1))
+
+# get official national weights
+pufweights1 <- read_csv(paste0(PUFDIR, "puf_weights.csv"))
+
+pufweights2 <- pufweights1 %>%
+  mutate(RECID=row_number())
+
+pufweights3 <- pufweights2 %>%
+  mutate(across(starts_with("WT"), ~ .x / 100)) %>%
+  left_join(stweights2017 %>%
+              select(RECID, REWT2017=weight),
+            by="RECID") %>%
+  mutate(filer2017=!is.na(REWT2017),
+         # fill in REWT2017 with WT2017 where REWT2017 is missing
+         REWT2017=ifelse(filer2017, REWT2017, WT2017)) %>%
+  select(RECID, filer2017, REWT2017, everything())
+count(pufweights3, filer2017)
+
+pwlong <- pufweights3 %>%
+  pivot_longer(-c(RECID, filer2017, WT2017, REWT2017), names_to="wtyear", values_to = "pufweight") %>%
+  group_by(filer2017, wtyear) %>%
+  mutate(ratio=sum(pufweight) / sum(WT2017),
+         futureweight=ifelse(filer2017, REWT2017 * ratio, pufweight))
+
+# flip the file so that we have the new weights
+usreweights <- pwlong %>%
+  filter(wtyear %in% paste0("WT", 2018:2031)) %>%
+  select(RECID, filer2017, WT2017, REWT2017, wtyear, futureweight) %>%
+  mutate(wtyear=paste0("RE", wtyear)) %>%
+  pivot_wider(names_from = wtyear, values_from = futureweight)
+
+write_csv(usreweights, paste0(WEIGHTDIR, "usreweights.csv"))
+
+# compare the reweights for 2021 to what I previously had for 2021
+w2021 <- read_csv(paste0(WEIGHTDIR, "weights2021.csv")) %>% select(-WT2021)
+check <- bind_rows(w2021 %>% mutate(type="prior"),
+                   usreweights %>% 
+                     select(all_of(names(w2021))) %>%
+                     mutate(type="new"))
+
+check2 <- check %>%
+  pivot_longer(contains("WT")) %>%
+  pivot_wider(names_from = type) %>%
+  filter(abs(new - prior) > 0.1) # we want this to be empty
+  
+# calculate rough weights for the data year REWT2021
+# apply a single ratio to all 2017 filer weights, calculated as
+# the sum of 2022 2017 filer weights
+# pwratio = weights2021.loc[weights2021.filer2017==True, 'WT2021'].sum() \
+#     / weights2021.loc[weights2021.filer2017==True, 'WT2017'].sum()
+
+
+# original python code
+# PWDIR = '/media/don/data/puf_files/puf_csv_related_files/PSL/2021-07-20/'
+# pufweights = pd.read_csv(PWDIR + 'puf_weights.csv')
+# # create a RECID column
+# pufweights['RECID'] = np.arange(pufweights.shape[0]) + 1
+# pufweights.head()
+# 
+# # bring in my 2017 weights as REWT2017
+# weights2017 = pd.read_csv(WDIR + 'allweights2017_geo_restricted.csv') # 227766, filers only
+# weights2017['RECID'] = weights2017.pid + 1
+# 
+# weights2021 = pd.merge(pufweights.loc[:, ['RECID', 'WT2017', 'WT2021']], \
+#     weights2017.loc[:, ['RECID', 'weight']].rename(columns={'weight': 'REWT2017'}), \
+#         how='left', on='RECID')
+# 
+# # convert puf weights to decimal weights
+# weights2021.loc[:, ['WT2017', 'WT2021']] = weights2021.loc[:, ['WT2017', 'WT2021']] / 100.
+# 
+# # create filer2017 indicator for missing/nonmissing
+# weights2021['filer2017'] = weights2021.REWT2017.notna()
+# weights2021.filer2017.value_counts()  # good
+# 
+# # fill in REWT2017 with WT2017 where REWT2017 is missing
+# weights2021.loc[weights2021.filer2017==False, 'REWT2017'] = \
+#     weights2021.loc[weights2021.filer2017==False, 'WT2017']
+# 
+# # calculate rough 2021 weights as REWT2021
+# # apply a single ratio to all 2017 filer weights
+# pwratio = weights2021.loc[weights2021.filer2017==True, 'WT2021'].sum() \
+#     / weights2021.loc[weights2021.filer2017==True, 'WT2017'].sum()
+# 
+# # multiply 2017 filer reweights by the fixed ratio
+# weights2021.loc[weights2021.filer2017==True, 'REWT2021'] = \
+#     weights2021.loc[weights2021.filer2017==True, 'REWT2017'] * pwratio
+# weights2021.loc[weights2021.filer2017==False, 'REWT2021'] = \
+#     weights2021.loc[weights2021.filer2017==False, 'WT2021']
+# 
+# weights2021 = weights2021.loc[:, ['RECID', 'filer2017', 'WT2017', 'WT2021', 'REWT2017', 'REWT2021']]
+
+```
 
 # DATA PREPARATION
+
 ```{r get_reform_descriptions}
 url <- "https://docs.google.com/spreadsheets/d/1aEQlAV2I9HSnG00TEmjCE_Sj44vqLWIrXwbW0DTtID0/edit#gid=0"
 reform_descriptions <- read_sheet(url)
@@ -95,13 +202,25 @@ reform_descriptions
 ```
 
 
-```{r get_weights, include=FALSE}
-# get national weights, state weights and create state shares,
+```{r prepare_state_weights, include=FALSE}
+# get my all-years national reweights 
+#   assumes same growth in returns post 2017 as in puf weights
+usreweights <- read_csv(paste0(WEIGHTDIR, 'usreweights.csv')) 
+glimpse(reusweights)
 
+usreweights %>%
+  select(-c(REWT2024:REWT2030)) %>%
+  group_by(filer2017) %>%
+  summarise(across(-c(RECID), ~ sum(.x))) %>%
+  add_row() %>%
+  mutate(across(-filer2017, ~ifelse(is.na(filer2017), sum(.x, na.rm=TRUE), .x)))
+
+# get my 2017 state reweights
 stweights2017 <- read_csv(paste0(WEIGHTDIR, 'allweights2017_geo_restricted.csv')) %>%
-  mutate(RECID=pid + 1)
-glimpse(stweights2017)
+  mutate(RECID=as.integer(pid + 1))
+# glimpse(stweights2017)
 
+# create state shares from my national and state weights
 stshares <- stweights2017 %>%
   mutate(across(all_of(geos), ~ .x / geoweight_sum))
 glimpse(stshares)
@@ -111,42 +230,29 @@ check <- stshares %>%
   pivot_longer(cols=all_of(geos)) %>%
   group_by(RECID) %>%
   summarise(sum=sum(value), .groups="drop")
-check %>% filter(abs(sum - 1) > 1e-6)  
+check %>% filter(abs(sum - 1) > 1e-6) # we want this to be empty
 
-usweights <- read_csv(paste0(WEIGHTDIR, 'weights2021.csv'))
-glimpse(usweights)
-usweights %>%
-  group_by(filer2017) %>%
-  summarise(across(-c(RECID), ~ sum(.x))) %>%
-  add_row() %>%
-  mutate(across(-filer2017, ~ifelse(is.na(filer2017), sum(.x, na.rm=TRUE), .x)))
-
-# create state weights for both sets of 2021 national weights
-stweights2021_all <- usweights %>%
-  select(RECID, filer2017, WT2021, REWT2021) %>%
-  pivot_longer(cols=c(WT2021, REWT2021),
-               names_to = "wtype", values_to = "US") %>%
+# create state weights
+stweights <- usreweights %>%
+  select(RECID, filer2017, US=all_of(REWTVAR)) %>%
   left_join(stshares %>% select(RECID, all_of(geos)), by="RECID") %>%
   mutate(across(all_of(geos), ~ .x * US))
-glimpse(stweights2021) # note that this gives us NA state weights for nonfilers; eventually we'll have nonfiler weights
+glimpse(stweights) 
+# note that this gives NA state weights for nonfilers; eventually need nonfiler weights
 
 # verify that state weights sum to national weights for each record
-check <- stweights2021_all %>%
+check <- stweights %>%
   filter(filer2017) %>%
-  select(RECID, wtype, US, all_of(geos)) %>%
-  pivot_longer(-c(RECID, wtype, US)) %>%
-  group_by(RECID, wtype, US) %>%
+  select(RECID, US, all_of(geos)) %>%
+  pivot_longer(-c(RECID, US)) %>%
+  group_by(RECID, US) %>%
   summarise(wtsum=sum(value), .groups="drop") %>%
   mutate(diff=wtsum - US,
          pdiff=diff / US * 100)
 # quantile(check$pdiff)  # should be very near zero
 
 # Are any weights negative??
-# summary(stweights2021)  # no
-
-stweights2021 <- stweights2021_all %>%
-  filter(wtype=="REWT2021") %>%
-  select(-wtype)
+# summary(stweights)  # no
 
 ```
 
@@ -160,10 +266,10 @@ tcvars <- c("RECID", "c00100", "e00200",  "standard", "c04470", "c18300",
 
 ```{r get_baseline}
 
-basedf <- read_parquet(paste0(REFDIR, "baseline.parquet"),  # 2021
+basedf <- read_parquet(paste0(REFDIR, "baseline.parquet"),
                        col_select = all_of(tcvars)) %>%
   mutate(agibase=c00100, 
-         taxstatus=ifelse(iitax >= 0, "taxpayer", "negtax"),
+         taxstatus=ifelse(combined >= 0, "taxpayer", "negtax"),
          numret=1, type="base",
          refnum=0)
 # postaxind indicates that a filer had positive tax in the base analysis, as we will compute
@@ -181,10 +287,11 @@ get_reformdf <- function(refnum){
     left_join(basedf %>% select(RECID, agibase, numret, taxstatus), by="RECID") %>%
     mutate(type="reform", refnum=!!refnum)
 }
+# reformdf <- get_reformdf(1)
 
 stack_files <- function(basedf, reformdf){
   stack <- bind_rows(basedf, reformdf) %>%
-    left_join(stweights2021, by="RECID") %>%
+    left_join(stweights, by="RECID") %>%
     mutate(stub=cut(agibase, 
                   agi_stubs$agicut, 
                   labels=agi_stubs$agilabel[-1], include.lowest = TRUE, right=FALSE),
@@ -193,6 +300,7 @@ stack_files <- function(basedf, reformdf){
            dispinc=xpinc - combined) %>%
     select(-expanded_income, -benefit_value_total)
 }
+# stack <- stack_files(basedf, reformdf)
 
 weight_stack <- function(stack){
   wstack <- stack %>%
@@ -201,10 +309,12 @@ weight_stack <- function(stack){
                        agi=~.x * c00100,
                        xpinc=~.x * xpinc,
                        dispinc=~.x * dispinc,
+                       combined=~.x * combined,
                        iitax=~.x * iitax,
                        salt=~.x * c18300))) %>%
   select(-c(US, all_of(geos)))
 }
+# wstack <- weight_stack(stack)
 
 get_wsums <- function(wstack){
   wsums <- wstack %>%
@@ -215,6 +325,7 @@ get_wsums <- function(wstack){
   group_by(type, refnum, taxstatus, stubnum, stub) %>%
   summarise(across(.cols=everything(), sum), .groups="drop")
 }
+# wsums <- get_wsums(wstack)
 
 get_filersums <- function(wsums){
   
@@ -244,6 +355,7 @@ get_filersums <- function(wsums){
   
   filersums
 }
+# filersums <- get_filersums(wsums)
   
 get_xpinc <- function(filersums){
   # create an "xpincxreform" concept - xpanded income minus the tax change
@@ -261,12 +373,14 @@ get_xpinc <- function(filersums){
     arrange(taxstatus, stabbr, stubnum, stub, type)
   
   # convert back to long
-  xpincxrlong <- xpincxreform %>%
+  xpinc <- xpincxreform %>%
     select(type, refnum, stabbr, stub, stubnum, taxstatus, xpincxreform) %>%
     pivot_longer(xpincxreform, names_to = "variable", values_to = "wtdsum")
   
-  xpincxrlong
+  xpinc
 }
+# xpinc <- get_xpinc(filersums)
+
 
 get_changes <- function(filersums, xpinc){
   changes1 <- bind_rows(filersums, xpinc) %>%
@@ -293,11 +407,18 @@ get_changes <- function(filersums, xpinc){
   
   changes
 }
+changes <- get_changes(filersums, xpinc)
+
+# count(changes, stabbr) # 52: US, 50 states, other
+# count(changes, variable)
+# count(changes, stubnum, stub)  # no negtax values for the highest income ranges
+# count(changes, taxstatus)
+# count(changes, measure)
 
 ```
 
 
-```{r get_usiitax_data}
+```{r organize_results}
 get_usiitax <- function(changes){
   stiitax <- changes %>%
     filter(measure %in% c("wtdsum", "avgval"),
@@ -322,6 +443,30 @@ get_usiitax <- function(changes){
   usiitax
 }
 
+get_uscombined <- function(changes){
+  stcombined <- changes %>%
+    filter(measure %in% c("wtdsum", "avgval"),
+           variable %in% c("combined", "dispinc")) %>%
+    select(variable, stabbr, taxstatus, stubnum, stub, measure,
+           base, reform, change, pchange) %>%
+    pivot_longer(-c(stabbr, taxstatus, stubnum, stub, variable, measure)) %>%
+    unite("name", c(measure, name)) %>%
+    pivot_wider() %>%
+    mutate(junk="") %>%
+    arrange(stubnum) %>%
+    select(variable, stabbr, taxstatus, stubnum, stub,
+           starts_with("wtdsum"), junk, starts_with("avg")) %>%
+    filter(variable=="combined") %>%
+    select(-variable)
+
+  uscombined <- stcombined %>%
+    filter(stabbr=="US") %>%
+    select(taxstatus, stubnum, stub, 
+           starts_with("wtdsum"), junk, starts_with("avg"))
+  
+  uscombined
+}
+
 ```
 
 
@@ -336,30 +481,27 @@ filersums <- get_filersums(wsums) # summary data
 xpinc <- get_xpinc(filersums)
 changes <- get_changes(filersums, xpinc)
 usiitax <- get_usiitax(changes)
+uscombined <- get_uscombined(changes)
 
 
-dim(wsums)
-
+dim(wsums) # each col is weighted value for variable, state
 # OLD: 36 rows: type 2, wtype 2, stubs 9, each col is weighted value for variable, state
-glimpse(wsums) # 64 rows: type 2, wtype 2, stubs 9 for taxpayer, 7 for negtax
-# each col is weighted value for variable, state
+glimpse(wsums)
 count(wsums, type) # base, reform
-count(wsums, wtype) # WT2021, REWT2021
 count(wsums, stubnum, stub) # 9 stubs
 count(wsums, refnum)
-count(wsums, type, wtype, stubnum, stub) # 64 records??
+count(wsums, type, stubnum, stub) # 18 records
 names(wsums)
 ns(wsums)
 
 wsums %>% filter(wtype=="REWT2021", type=="base") %>% select(1:7)
 
 dim(wstack)
-glimpse(wstack) # ~1m recs, variables are weighted
+glimpse(wstack) # ~500k recs, variables are weighted
 ns(wstack)
 
 summary(filersums)
 count(filersums, type)
-count(filersums, wtype)
 count(filersums, taxstatus)
 count(filersums, stubnum, stub)
 count(filersums, variable)
@@ -371,36 +513,38 @@ count(filersums, stabbr)
 
 ## National analysis
 
-```{r ustable, include=TRUE}
+```{r uscombined_table, include=TRUE}
 
 reform_name <- reform_descriptions %>%
   filter(number==refnum) %>% .$description
 
 # for this first US table we want all filers
-tabdata <- usiitax %>%
+tabdata <- uscombined %>%
   filter(taxstatus=="allfilers") %>%
   select(-taxstatus)
 
 dcols <- c("wtdsum_base", "wtdsum_reform", "wtdsum_change", "avgval_base", "avgval_reform", "avgval_change")
 pcols <- c("wtdsum_pchange", "avgval_pchange")
 
+subt <- "Aggregate and average tax liabilities by income group"
+
 tab <- tabdata %>%
   select(-stubnum) %>%
   gt()  %>%  
   tab_header(
-    title = paste0(reform_name, " compared to current 2021 law"),
-    subtitle = "Aggregate tax liabilities by income group ($ billions)"
+    title = paste0(reform_name, " compared to current 2022 law"),
+    subtitle = subt
   ) %>%
   cols_label(
       stub = "",
-      wtdsum_base = "2021 current law",
+      wtdsum_base = "2022 current law",
       wtdsum_reform = reform_name,
       wtdsum_change = html("$ change: <br>Reform minus<br>current law"),
       wtdsum_pchange = html("% change: <br>Reform versus<br>current law"),
       
       junk="",
       
-      avgval_base = "2021 current law",
+      avgval_base = "2022 current law",
       avgval_reform = reform_name,
       avgval_change = html("$ change: <br>Reform minus<br>current law"),
       avgval_pchange = html("% change: <br>Reform versus<br>current law")
@@ -451,7 +595,7 @@ tab <- tabdata %>%
       )
   ) %>%
   tab_spanner(
-    label = html("Total impact in $ billions"),
+    label = html("Aggregate impact in $ billions"),
     columns = c("wtdsum_base", "wtdsum_reform", "wtdsum_change", "wtdsum_pchange",)
   ) %>%
   tab_spanner(
@@ -469,11 +613,11 @@ tab <- tabdata %>%
 tab
 
 # configure save settings for wide table
-refname <- paste0("reform", refnum)
-dir.create(file.path(here::here("results", refname)), showWarnings = FALSE)
-fname <- paste0(refname, "_USImpact_table.png")
+folder_name <- paste0("reform", refnum)
+dir.create(file.path(here::here("results", folder_name)), showWarnings = FALSE)
+fname <- paste0(folder_name, "_USImpact_combined_table.png")
 # zoom 2 default
-gtsave(tab, fname, path = here::here("results", refname), zoom=2, vwidth=1500)  
+gtsave(tab, fname, path = here::here("results", folder_name), zoom=2, vwidth=1500)  
 
 
 ```
