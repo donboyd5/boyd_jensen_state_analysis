@@ -509,9 +509,168 @@ count(filersums, stabbr)
 
 ```
 
+```{r get_all}
+get_all <- function(refnum) {
+  reform_name <- reform_descriptions %>%
+  filter(number==refnum) %>% .$description
+  
+  reformdf <- get_reformdf(refnum)  # return-level data
+  stack <- stack_files(basedf, reformdf)  # return-level data
+  wstack <- weight_stack(stack)  # return-level data
+  wsums <- get_wsums(wstack)  # summary data
+  filersums <- get_filersums(wsums) # summary data
+  xpinc <- get_xpinc(filersums)
+  changes <- get_changes(filersums, xpinc)
+  usiitax <- get_usiitax(changes)
+  uscombined <- get_uscombined(changes)
+  
+  results <- list()
+  results$refnum <- refnum
+  results$reform_name <- reform_name
+  results$changes <- changes
+  results$usiitax <- usiitax
+  results$uscombined <- uscombined
+  results
+  }
+
+# lcheck <- get_all(2)
+# lcheck$refnum
+# lcheck$reform_name
+# lcheck$uscombined
+```
+
+
 # TABLES AND GRAPHS
 
+```{r}
+
+```
+
 ## National analysis
+
+```{r national_tab_functions}
+
+tab_combined <- function(uscombined, reform_name){
+  tabdata <- uscombined %>%
+    filter(taxstatus=="allfilers") %>%
+    select(-taxstatus)
+  
+  dcols <- c("wtdsum_base", "wtdsum_reform", "wtdsum_change", "avgval_base",
+             "avgval_reform", "avgval_change")
+  pcols <- c("wtdsum_pchange", "avgval_pchange")
+
+  subt <- "Aggregate and average tax liabilities by income group"
+
+  tab <- tabdata %>%
+    select(-stubnum) %>%
+    gt()  %>%  
+    tab_header(
+      title = paste0(reform_name, " compared to current 2022 law"),
+      subtitle = subt
+    ) %>%
+    cols_label(
+      stub = "",
+      wtdsum_base = "2022 current law",
+      wtdsum_reform = reform_name,
+      wtdsum_change = html("$ change: <br>Reform minus<br>current law"),
+      wtdsum_pchange = html("% change: <br>Reform versus<br>current law"),
+      
+      junk="",
+      
+      avgval_base = "2022 current law",
+      avgval_reform = reform_name,
+      avgval_change = html("$ change: <br>Reform minus<br>current law"),
+      avgval_pchange = html("% change: <br>Reform versus<br>current law")
+      ) %>%
+    
+    fmt_currency(
+      columns = all_of(str_subset(dcols, "wtdsum")),
+      rows=1,
+      decimals = 1,
+      scale_by = 1e-9,
+      suffixing = FALSE
+    )   %>%
+    fmt_currency(
+      columns = all_of(str_subset(dcols, "avgval")),
+      rows=1,
+      decimals = 0,
+      scale_by = 1,
+      suffixing = FALSE
+    )   %>%
+    fmt_number(
+      columns = all_of(str_subset(dcols, "wtdsum")),
+      rows=2:nrow(tabdata),
+      decimals = 1,
+      scale_by = 1e-9,
+      suffixing = FALSE
+    ) %>%
+    fmt_number(
+      columns = all_of(str_subset(dcols, "avgval")),
+      rows=2:nrow(tabdata),
+      decimals = 0,
+      scale_by = 1,
+      suffixing = FALSE
+    ) %>%
+    
+    fmt_percent(
+      columns = all_of(pcols),
+      decimals = 1
+    ) %>%
+    fmt_missing(
+      columns=all_of(pcols),
+      missing_text = "--") %>%
+    tab_style(
+      style = list(
+        cell_fill(color = "#f7f7f7")
+      ),
+      locations = cells_body(
+        rows = seq(1, nrow(tabdata), 2)
+        )
+    ) %>%
+    tab_spanner(
+      label = html("Aggregate impact in $ billions"),
+      columns = c("wtdsum_base", "wtdsum_reform", "wtdsum_change", "wtdsum_pchange",)
+    ) %>%
+    tab_spanner(
+      label = html("Average impact over all returns, in dollars"),
+      columns = c("avgval_base", "avgval_reform", "avgval_change", "avgval_pchange")
+    ) %>%
+    cols_width(
+      stub ~ px(150),
+      starts_with("wtd") ~ px(100),
+      junk ~ px(20),
+      starts_with("avg") ~ px(100),
+      everything() ~ px(60)
+    )
+  
+  tab
+}
+
+
+save_combined <- function(tab, refnum){
+  # configure save settings for wide table
+  folder_name <- paste0("reform", refnum)
+  dir.create(file.path(here::here("results", folder_name)), showWarnings = FALSE)
+  fname <- paste0(folder_name, "_USImpact_combined_table.png")
+  # zoom 2 default
+  gtsave(tab, fname, path = here::here("results", folder_name), zoom=2, vwidth=1500) 
+}
+
+
+```
+
+
+```{r loop_national}
+for(refnum in 1:13){
+  print(paste0("Reform #: ", refnum))
+  results <- get_all(refnum)
+  tab <- tab_combined(results$uscombined, results$reform_name)
+  save_combined(tab, refnum)
+}
+
+```
+
+
 
 ```{r uscombined_table, include=TRUE}
 
