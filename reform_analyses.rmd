@@ -14,6 +14,7 @@ editor_options:
 ---
 
 # SETUP
+
 ```{r setup, eval=TRUE, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
 
 # note that eval=TRUE unless set to FALSE
@@ -53,11 +54,10 @@ library(RColorBrewer)
 ```{r locations}
 # SALTDIR <- r"(E:\pufanalysis_outputs\salt_tc3.2.1\)"
 WEIGHTDIR <- r"(E:\puf_analysis_inputs\weights\)"  
-REFDIR <- r"(E:\pufanalysis_outputs\reform_outputs\)"
+REFDIR <- r"(E:\pufanalysis_outputs\reform_data_outputs\)"
 PUFDIR <- r"(E:\data\puf_files\puf_csv_related_files\PSL\2021-07-20\)"
 
 ```
-
 
 ```{r constants}
 BASEYEAR <- 2017
@@ -79,7 +79,6 @@ agi_stubs <- tribble(~agicut, ~agilabel,
                      1e6, "$500k < $1m",
                      Inf, "$1m+")
 
-
 ```
 
 ```{r utility_functions}
@@ -90,7 +89,7 @@ get_stname <- function(stabbr){
 }
 ```
 
-# ONETIME DATA PREPARATION
+# ONETIME DATA PREPARATION - DO NOT RUN UNLESS WEIGHTS CHANGE
 
 ```{r ONETIME_prepare_usreweights}
 # create state weights for a different year; we want
@@ -194,6 +193,20 @@ check2 <- check %>%
 
 # DATA PREPARATION
 
+Overview:
+
+-   files:
+
+    -   stack = 3 files stacked:
+
+        -   basedf, reformdf, and reform_behdf, identified by "type"
+
+        -   1 record per return per, with tc results and all input vars
+
+    -   stack
+
+-   def
+
 ```{r get_reform_descriptions}
 url <- "https://docs.google.com/spreadsheets/d/1aEQlAV2I9HSnG00TEmjCE_Sj44vqLWIrXwbW0DTtID0/edit#gid=0"
 reform_descriptions <- read_sheet(url)
@@ -201,12 +214,11 @@ reform_descriptions
 
 ```
 
-
 ```{r prepare_state_weights, include=FALSE}
 # get my all-years national reweights 
 #   assumes same growth in returns post 2017 as in puf weights
 usreweights <- read_csv(paste0(WEIGHTDIR, 'usreweights.csv')) 
-glimpse(reusweights)
+glimpse(usreweights)
 
 usreweights %>%
   select(-c(REWT2024:REWT2030)) %>%
@@ -256,13 +268,11 @@ check <- stweights %>%
 
 ```
 
-
 ```{r define_tcvars}
 tcvars <- c("RECID", "c00100", "e00200",  "standard", "c04470", "c18300",
           "iitax", "combined",
           "expanded_income", "benefit_value_total")
 ```
-
 
 ```{r get_baseline}
 
@@ -270,27 +280,37 @@ basedf <- read_parquet(paste0(REFDIR, "baseline.parquet"),
                        col_select = all_of(tcvars)) %>%
   mutate(agibase=c00100, 
          taxstatus=ifelse(combined >= 0, "taxpayer", "negtax"),
-         numret=1, type="base",
+         numret=1, runtype="base",
          refnum=0)
 # postaxind indicates that a filer had positive tax in the base analysis, as we will compute
 # some averages for this subset of filers
 
 ```
 
-
-```{r get_reform}
+```{r functions_get_reform}
 # reform1_beh.parquet
 get_reformdf <- function(refnum){
   reform_file <- paste0("reform", refnum, ".parquet")
   reformdf <- read_parquet(paste0(REFDIR, reform_file),  # OLD: reform2021.parquet
                        col_select = all_of(tcvars)) %>%
     left_join(basedf %>% select(RECID, agibase, numret, taxstatus), by="RECID") %>%
-    mutate(type="reform", refnum=!!refnum)
+    mutate(runtype="reform", refnum=!!refnum)
+  reformdf
 }
 # reformdf <- get_reformdf(1)
 
-stack_files <- function(basedf, reformdf){
-  stack <- bind_rows(basedf, reformdf) %>%
+get_reform_behdf <- function(refnum){
+  reform_file <- paste0("reform", refnum, "_beh.parquet")
+  reform_behdf <- read_parquet(paste0(REFDIR, reform_file),  # OLD: reform2021.parquet
+                       col_select = all_of(tcvars)) %>%
+    left_join(basedf %>% select(RECID, agibase, numret, taxstatus), by="RECID") %>%
+    mutate(runtype="reform_beh", refnum=!!refnum)
+  reform_behdf
+}
+# reform_behdf <- get_reform_behdf(1)
+
+stack_files <- function(basedf, reformdf, reform_behdf){
+  stack <- bind_rows(basedf, reformdf, reform_behdf) %>%
     left_join(stweights, by="RECID") %>%
     mutate(stub=cut(agibase, 
                   agi_stubs$agicut, 
@@ -300,7 +320,7 @@ stack_files <- function(basedf, reformdf){
            dispinc=xpinc - combined) %>%
     select(-expanded_income, -benefit_value_total)
 }
-# stack <- stack_files(basedf, reformdf)
+# stack <- stack_files(basedf, reformdf, reform_behdf)
 
 weight_stack <- function(stack){
   wstack <- stack %>%
@@ -322,7 +342,7 @@ get_wsums <- function(wstack){
     select(-c(RECID, filer2017, numret, 
               c00100, e00200, c18300, c04470, standard, 
               combined, iitax, agibase, xpinc, dispinc)) %>%
-  group_by(type, refnum, taxstatus, stubnum, stub) %>%
+  group_by(runtype, refnum, taxstatus, stubnum, stub) %>%
   summarise(across(.cols=everything(), sum), .groups="drop")
 }
 # wsums <- get_wsums(wstack)
@@ -330,12 +350,12 @@ get_wsums <- function(wstack){
 get_filersums <- function(wsums){
   
   wsums_long <- wsums %>%
-    pivot_longer(-c(type, refnum, taxstatus, stubnum, stub),
+    pivot_longer(-c(runtype, refnum, taxstatus, stubnum, stub),
                  values_to = "wtdsum")
 
   # add in the all-stubs sum for each group
   stubsums <- wsums_long %>%
-    group_by(type, refnum, taxstatus, name) %>%
+    group_by(runtype, refnum, taxstatus, name) %>%
     summarise(wtdsum=sum(wtdsum, na.rm=TRUE), .groups="drop") %>%
     mutate(stubnum=0, stub="Total")
   
@@ -343,15 +363,15 @@ get_filersums <- function(wsums){
     mutate(stub=as.character(stub)) %>%
     bind_rows(stubsums) %>%
     separate(name, into=c("stabbr", "variable")) %>%
-    arrange(type, refnum, taxstatus, stabbr, variable, stubnum)
+    arrange(runtype, refnum, taxstatus, stabbr, variable, stubnum)
   
   # get an "all returns" category
   filersums <- allsums1 %>%
-    group_by(type, refnum, stabbr, variable, stub, stubnum) %>%
+    group_by(runtype, refnum, stabbr, variable, stub, stubnum) %>%
     summarise(wtdsum=sum(wtdsum), .groups="drop") %>%
     mutate(taxstatus="allfilers") %>%
     bind_rows(allsums1) %>%
-    arrange(type, taxstatus, stabbr, variable)
+    arrange(runtype, taxstatus, stabbr, variable)
   
   filersums
 }
@@ -359,22 +379,22 @@ get_filersums <- function(wsums){
   
 get_xpinc <- function(filersums){
   # create an "xpincxreform" concept - xpanded income minus the tax change
-  # for base it will be xpinc, but for reform it will be xpinc - iitax
+  # for base it will be xpinc, but for reforms it will be xpinc - combined
   xpincxreform <- filersums %>%
-    filter(variable %in% c("xpinc", "iitax")) %>%
+    filter(variable %in% c("xpinc", "combined")) %>%
     pivot_wider(names_from = variable, values_from=wtdsum) %>%
     group_by(taxstatus, stabbr, stub, stubnum) %>%
-    mutate(basetax=iitax[type=="base"],
-           basexpinc=xpinc[type=="base"],
-           xpincxreform=ifelse(type=="base", 
+    mutate(basetax=combined[runtype=="base"],
+           basexpinc=xpinc[runtype=="base"],
+           xpincxreform=ifelse(runtype=="base", 
                                xpinc, 
-                               basexpinc + basetax - iitax)) %>%
+                               basexpinc + basetax - combined)) %>%
     ungroup %>%
-    arrange(taxstatus, stabbr, stubnum, stub, type)
+    arrange(taxstatus, stabbr, stubnum, stub, runtype)
   
   # convert back to long
   xpinc <- xpincxreform %>%
-    select(type, refnum, stabbr, stub, stubnum, taxstatus, xpincxreform) %>%
+    select(runtype, refnum, stabbr, stub, stubnum, taxstatus, xpincxreform) %>%
     pivot_longer(xpincxreform, names_to = "variable", values_to = "wtdsum")
   
   xpinc
@@ -383,8 +403,9 @@ get_xpinc <- function(filersums){
 
 
 get_changes <- function(filersums, xpinc){
+  # changes has results for each state
   changes1 <- bind_rows(filersums, xpinc) %>%
-    group_by(type, refnum, taxstatus, stabbr, stub, stubnum) %>%
+    group_by(runtype, refnum, taxstatus, stabbr, stub, stubnum) %>%
     mutate(numret=wtdsum[variable=="numret"],
            avgval=wtdsum / numret) %>%
     ungroup
@@ -392,113 +413,143 @@ get_changes <- function(filersums, xpinc){
   changes2 <- changes1 %>%
     select(-refnum) %>%  # leave this off until I redefine it
     pivot_longer(c(wtdsum, numret, avgval), names_to = "measure") %>%
-    pivot_wider(names_from=type, values_from=value) %>%
+    pivot_wider(names_from=runtype, values_from=value) %>%
+    pivot_longer(cols=starts_with("reform"),
+                 names_to = "runtype", values_to = "reform") %>%
     mutate(change=reform - base,
-           pchange=ifelse(base > 0, change / base, NA_real_))
+           pchange=ifelse(base > 0, change / base, NA_real_)) %>%
+    relocate(runtype, .before = base)
 
   # put US values on the file
   changes <- changes2 %>%
     left_join(changes2 %>% 
                 filter(stabbr=="US") %>% 
-                select(taxstatus, stubnum, stub, variable, measure, 
+                select(taxstatus, stubnum, stub, variable, measure, runtype,
                        us_base=base, us_reform=reform, us_change=change,
                        us_pchange=pchange),
-              by=c("taxstatus", "stubnum", "stub", "variable", "measure"))
+              by=c("taxstatus", "stubnum", "stub", "variable", "measure", "runtype"))
   
   changes
 }
-changes <- get_changes(filersums, xpinc)
+# changes <- get_changes(filersums, xpinc)
 
 # count(changes, stabbr) # 52: US, 50 states, other
 # count(changes, variable)
 # count(changes, stubnum, stub)  # no negtax values for the highest income ranges
 # count(changes, taxstatus)
 # count(changes, measure)
+# count(changes, reftype)
 
 ```
 
+```{r functions_organize_results}
+# get_usiitax <- function(changes){
+#   stiitax <- changes %>%
+#     filter(measure %in% c("wtdsum", "avgval"),
+#            variable %in% c("iitax", "dispinc")) %>%
+#     select(variable, stabbr, taxstatus, stubnum, stub, measure,
+#            base, reform, change, pchange) %>%
+#     pivot_longer(-c(stabbr, taxstatus, stubnum, stub, variable, measure)) %>%
+#     unite("name", c(measure, name)) %>%
+#     pivot_wider() %>%
+#     mutate(junk="") %>%
+#     arrange(stubnum) %>%
+#     select(variable, stabbr, taxstatus, stubnum, stub,
+#            starts_with("wtdsum"), junk, starts_with("avg")) %>%
+#     filter(variable=="iitax") %>%
+#     select(-variable)
+# 
+#   usiitax <- stiitax %>%
+#     filter(stabbr=="US") %>%
+#     select(taxstatus, stubnum, stub, 
+#            starts_with("wtdsum"), junk, starts_with("avg"))
+#   
+#   usiitax
+# }
 
-```{r organize_results}
-get_usiitax <- function(changes){
-  stiitax <- changes %>%
+
+# get_uscombined <- function(changes){
+#   stcombined <- changes %>%
+#     filter(measure %in% c("wtdsum", "avgval"),
+#            variable %in% c("combined", "dispinc")) %>%
+#     select(variable, stabbr, taxstatus, stubnum, stub, measure, runtype,
+#            base, reform, change, pchange) %>%
+#     pivot_longer(c(base, reform, change, pchange)) %>%
+#     unite("name", c(measure, name)) %>%
+#     pivot_wider() %>%
+#     mutate(junk="") %>%
+#     arrange(stubnum) %>%
+#     select(reftype, variable, stabbr, taxstatus, stubnum, stub,
+#            starts_with("wtdsum"), junk, starts_with("avg")) %>%
+#     filter(variable=="combined") %>%
+#     select(-variable)
+# 
+#   uscombined <- stcombined %>%
+#     filter(stabbr=="US") %>%
+#     select(reftype, taxstatus, stubnum, stub, 
+#            starts_with("wtdsum"), junk, starts_with("avg"))
+#   
+#   uscombined
+# }
+
+
+get_usnew <- function(changes, taxvar){
+  # taxvar <- "combined"
+  stnew <- changes %>%
     filter(measure %in% c("wtdsum", "avgval"),
-           variable %in% c("iitax", "dispinc")) %>%
-    select(variable, stabbr, taxstatus, stubnum, stub, measure,
+           variable %in% c(taxvar, "dispinc")) %>%
+    select(variable, stabbr, taxstatus, stubnum, stub, measure, runtype,
            base, reform, change, pchange) %>%
-    pivot_longer(-c(stabbr, taxstatus, stubnum, stub, variable, measure)) %>%
+    pivot_longer(c(base, reform, change, pchange)) %>%
     unite("name", c(measure, name)) %>%
     pivot_wider() %>%
-    mutate(junk="") %>%
+    # mutate(junk="") %>%
     arrange(stubnum) %>%
-    select(variable, stabbr, taxstatus, stubnum, stub,
-           starts_with("wtdsum"), junk, starts_with("avg")) %>%
-    filter(variable=="iitax") %>%
+    select(runtype, variable, stabbr, taxstatus, stubnum, stub,
+           starts_with("wtdsum"), starts_with("avg")) %>%
+    filter(variable==taxvar) %>%
     select(-variable)
 
-  usiitax <- stiitax %>%
+  usnew <- stnew %>%
     filter(stabbr=="US") %>%
-    select(taxstatus, stubnum, stub, 
-           starts_with("wtdsum"), junk, starts_with("avg"))
+    select(runtype, taxstatus, stubnum, stub, 
+           starts_with("wtdsum"), starts_with("avg"))
   
-  usiitax
+  usnew
 }
 
-get_uscombined <- function(changes){
-  stcombined <- changes %>%
-    filter(measure %in% c("wtdsum", "avgval"),
-           variable %in% c("combined", "dispinc")) %>%
-    select(variable, stabbr, taxstatus, stubnum, stub, measure,
-           base, reform, change, pchange) %>%
-    pivot_longer(-c(stabbr, taxstatus, stubnum, stub, variable, measure)) %>%
-    unite("name", c(measure, name)) %>%
-    pivot_wider() %>%
-    mutate(junk="") %>%
-    arrange(stubnum) %>%
-    select(variable, stabbr, taxstatus, stubnum, stub,
-           starts_with("wtdsum"), junk, starts_with("avg")) %>%
-    filter(variable=="combined") %>%
-    select(-variable)
-
-  uscombined <- stcombined %>%
-    filter(stabbr=="US") %>%
-    select(taxstatus, stubnum, stub, 
-           starts_with("wtdsum"), junk, starts_with("avg"))
-  
-  uscombined
-}
 
 ```
-
-
 
 ```{r test}
 refnum <- 1
 reformdf <- get_reformdf(refnum)  # return-level data
-stack <- stack_files(basedf, reformdf)  # return-level data
+stack <- stack_files(basedf, reformdf, reform_behdf)  # return-level data
 wstack <- weight_stack(stack)  # return-level data
 wsums <- get_wsums(wstack)  # summary data
 filersums <- get_filersums(wsums) # summary data
 xpinc <- get_xpinc(filersums)
 changes <- get_changes(filersums, xpinc)
-usiitax <- get_usiitax(changes)
-uscombined <- get_uscombined(changes)
+# usiitax2 <- get_usiitax(changes)
+uscombined <- get_usnew(changes, "combined")
+# uscombined2 <- get_uscombined(changes)
 
 
-dim(wsums) # each col is weighted value for variable, state
+# dim(wsums) # each col is weighted value for variable, state
 # OLD: 36 rows: type 2, wtype 2, stubs 9, each col is weighted value for variable, state
-glimpse(wsums)
-count(wsums, type) # base, reform
-count(wsums, stubnum, stub) # 9 stubs
-count(wsums, refnum)
-count(wsums, type, stubnum, stub) # 18 records
-names(wsums)
-ns(wsums)
+# glimpse(wsums)
+# count(wsums, type) # base, reform
+# count(wsums, stubnum, stub) # 9 stubs
+# count(wsums, refnum)
+# count(wsums, type, stubnum, stub) # 18 records
+# names(wsums)
+# ns(wsums)
 
-wsums %>% filter(wtype=="REWT2021", type=="base") %>% select(1:7)
+# wsums %>% filter(type=="base") %>% select(1:7)
 
-dim(wstack)
-glimpse(wstack) # ~500k recs, variables are weighted
-ns(wstack)
+# dim(wstack)
+# glimpse(wstack) # ~500k recs, variables are weighted
+# ns(wstack)
 
 summary(filersums)
 count(filersums, type)
@@ -509,20 +560,22 @@ count(filersums, stabbr)
 
 ```
 
-```{r get_all}
+```{r function_get_all}
 get_all <- function(refnum) {
+  # compuate all values needed for a single reform
+  print(paste0("Getting results for reform #: ", refnum))
   reform_name <- reform_descriptions %>%
   filter(number==refnum) %>% .$description
   
   reformdf <- get_reformdf(refnum)  # return-level data
-  stack <- stack_files(basedf, reformdf)  # return-level data
+  stack <- stack_files(basedf, reformdf, reform_behdf)  # return-level data
   wstack <- weight_stack(stack)  # return-level data
   wsums <- get_wsums(wstack)  # summary data
   filersums <- get_filersums(wsums) # summary data
   xpinc <- get_xpinc(filersums)
   changes <- get_changes(filersums, xpinc)
-  usiitax <- get_usiitax(changes)
-  uscombined <- get_uscombined(changes)
+  usiitax <- get_usnew(changes, "iitax")
+  uscombined <- get_usnew(changes, "combined")
   
   results <- list()
   results$refnum <- refnum
@@ -539,21 +592,19 @@ get_all <- function(refnum) {
 # lcheck$uscombined
 ```
 
-
 # TABLES AND GRAPHS
-
-```{r}
-
-```
 
 ## National analysis
 
-```{r national_tab_functions}
+```{r functions_national_tab}
 
 tab_combined <- function(uscombined, reform_name){
   tabdata <- uscombined %>%
     filter(taxstatus=="allfilers") %>%
-    select(-taxstatus)
+    select(-taxstatus) %>%
+    # put in a blank column for nicer table
+    mutate(junk="") %>%
+    relocate(junk, .after=wtdsum_pchange)
   
   dcols <- c("wtdsum_base", "wtdsum_reform", "wtdsum_change", "avgval_base",
              "avgval_reform", "avgval_change")
@@ -562,7 +613,7 @@ tab_combined <- function(uscombined, reform_name){
   subt <- "Aggregate and average tax liabilities by income group"
 
   tab <- tabdata %>%
-    select(-stubnum) %>%
+    select(-stubnum, -runtype) %>%
     gt()  %>%  
     tab_header(
       title = paste0(reform_name, " compared to current 2022 law"),
@@ -646,31 +697,70 @@ tab_combined <- function(uscombined, reform_name){
   tab
 }
 
-
-save_combined <- function(tab, refnum){
+save_combined <- function(tab, refnum, runtype){
   # configure save settings for wide table
-  folder_name <- paste0("reform", refnum)
+  folder_name <- paste0(runtype, refnum)
   dir.create(file.path(here::here("results", folder_name)), showWarnings = FALSE)
   fname <- paste0(folder_name, "_USImpact_combined_table.png")
   # zoom 2 default
   gtsave(tab, fname, path = here::here("results", folder_name), zoom=2, vwidth=1500) 
 }
 
+```
+
+```{r loop_get_results}
+# Get list with results for each reform, one element per reform
+results_list <- purrr::map(1:13, get_all) 
+names(results_list[[1]])
+results_list[[1]]$refnum
+results_list[[1]]$reform_name
+results_list[[1]]$changes
+results_list[[1]]$usiitax
+results_list[[1]]$uscombined
+
+count(results_list[[1]]$changes, runtype)
 
 ```
 
-
-```{r loop_national}
-for(refnum in 1:13){
-  print(paste0("Reform #: ", refnum))
-  results <- get_all(refnum)
-  tab <- tab_combined(results$uscombined, results$reform_name)
-  save_combined(tab, refnum)
+```{r loop_national_tables}
+# for(refnum in 1:13){
+#   print(paste0("Reform #: ", refnum))
+#   results <- get_all(refnum)
+# 
+# }
+national_tables <- function(refnum, results_list, runtype="reform"){
+  # runtype: one of c("reform", "reform_beh")
+  style <- ifelse(runtype=="reform_beh",
+                  ", with behavioral response.",
+                  ", WITHOUT behavioral response.")
+  print(paste0("Getting & saving national tables for reform #: ", refnum, style))
+  results <- results_list[[refnum]]
+  
+  uscombined <- results$uscombined %>% filter(runtype==!!runtype)
+  
+  tab <- tab_combined(uscombined, results$reform_name)
+  save_combined(tab, refnum, runtype)
+  # return()
 }
 
+purrr::map(1:13, national_tables, results_list, runtype="reform") 
+purrr::map(1:13, national_tables, results_list, runtype="reform_beh") 
+
 ```
 
+```{r loop_state_tables}
 
+state_tables <- function(refnum, results_list){
+  print(paste0("Getting & saving state tables for reform #: ", refnum))
+  results <- results_list[[refnum]]
+  tab <- tab_combined(results$uscombined, results$reform_name)
+  save_combined(tab, refnum)
+  return()
+}
+
+purrr::map(1:13, state_tables, results_list) 
+
+```
 
 ```{r uscombined_table, include=TRUE}
 
@@ -781,11 +871,6 @@ gtsave(tab, fname, path = here::here("results", folder_name), zoom=2, vwidth=150
 
 ```
 
-
-
-
-
-
 ```{r rows.print=20}
 # data3 is the key result
 
@@ -861,10 +946,6 @@ data3 %>% filter(stabbr=="MS", stubnum==0, variable=="dispinc")
 
 ```
 
-
-
-
-
 ```{r reforms}
 resdir <- "results_tc3.2.1"
 
@@ -877,7 +958,6 @@ reform_name <- reform_names[runnum]
 runresults <- paste0("results_tc3.2.1/", runtypes[runnum])
 
 ```
-
 
 ```{r comp_revloss_shares}
 # reduce the revenue loss
@@ -950,7 +1030,6 @@ write_csv(tabdata, here::here(runresults, "USImpactReformVsRepeal_table_data.csv
 
 
 ```
-
 
 ```{r comp_states, rows.print=30}
 
@@ -1025,4 +1104,3 @@ gtsave(tab, "StatesImpactReformVsRepeal_table.png", path = here::here(runresults
 write_csv(tabdata, here::here(runresults, "StatesImpactReformVsRepeal_table_data.csv"))
 
 ```
-
