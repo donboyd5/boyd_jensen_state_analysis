@@ -524,6 +524,7 @@ get_usnew <- function(changes, taxvar){
 ```{r test}
 refnum <- 1
 reformdf <- get_reformdf(refnum)  # return-level data
+reform_behdf <- get_reform_behdf(refnum)
 stack <- stack_files(basedf, reformdf, reform_behdf)  # return-level data
 wstack <- weight_stack(stack)  # return-level data
 wsums <- get_wsums(wstack)  # summary data
@@ -552,7 +553,7 @@ uscombined <- get_usnew(changes, "combined")
 # ns(wstack)
 
 summary(filersums)
-count(filersums, type)
+count(filersums, runtype)
 count(filersums, taxstatus)
 count(filersums, stubnum, stub)
 count(filersums, variable)
@@ -748,21 +749,127 @@ purrr::map(1:13, national_tables, results_list, runtype="reform_beh")
 
 ```
 
-```{r loop_state_tables}
+## State analysis
 
-state_tables <- function(refnum, results_list){
-  print(paste0("Getting & saving state tables for reform #: ", refnum))
-  results <- results_list[[refnum]]
-  tab <- tab_combined(results$uscombined, results$reform_name)
-  save_combined(tab, refnum)
-  return()
+```{r functions_allstates_tabs}
+# get a table for all 50 states, for a given reform
+# tab_combined_states
+### Table of states ranked by $ billions change in combined, base to reform
+# names(results_list[[1]])
+# reform_name <- results_list[[1]]$reform_name
+# runtype <- "reform"
+# refnum <- 1
+
+tab_allstates_billions <- function(results_list, refnum, runtype){
+  
+  reform_name <- results_list[[refnum]]$reform_name
+  
+  tabtitle1 <- paste0(reform_name, " compared to current 2022 law")
+  tabtitle2 <- case_when(
+    runtype=="reform_beh" ~ "Estimated with behavioral response.",
+    runtype=="reform" ~ "Estimated WITHOUT behavioral response.",
+    TRUE ~ "ERROR!")
+  tabtitle <- html(paste0(tabtitle1, "<br>", tabtitle2))
+  
+  tabdata <- results_list[[refnum]]$changes %>%
+    filter(runtype==!!runtype,
+           stubnum==0, 
+           variable=="combined", 
+           measure=="wtdsum", 
+           taxstatus=="allfilers") %>%
+  filter(stabbr %in% c("US", state.abb)) %>%
+  mutate(stname=get_stname(stabbr),
+         share=change / change[stabbr=="US"]) %>%
+  arrange(change) %>%
+  select(stname, stname, base, reform, change, share, pchange)
+  
+  
+tab <- tabdata %>%
+  gt()  %>%  
+  tab_header(
+    title = tabtitle,
+    subtitle = "States ranked by change in combined tax, $ billions"
+  ) %>%
+  cols_label(
+    stname = "",
+    base = "2022 current law",
+    reform = "Reform",
+    change = html("$ change: <br>Reform minus<br>current law"),
+    share = html("% share of<br>U.S. change"),
+    pchange = html("% change: <br>Reform versus<br>current law")
+    ) %>%
+  fmt_currency(
+    columns = c("base", "reform", "change"),
+    rows=1,
+    decimals = 1,
+    scale_by = 1e-9,
+    suffixing = FALSE
+  )   %>%
+  fmt_number(
+    columns = c("base", "reform", "change"),
+    rows=2:nrow(tabdata),
+    decimals = 1,
+    scale_by = 1e-9,
+    suffixing = FALSE
+  ) %>%
+  fmt_percent(
+    columns = c("pchange", "share"),
+    decimals = 1
+  ) %>%
+  fmt_missing(
+    columns= c("pchange", "share"),
+    missing_text = "--") %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "#f7f7f7")
+    ),
+    locations = cells_body(
+      rows = seq(1, nrow(tabdata), 2)
+      )
+  )
+  tab
 }
 
-purrr::map(1:13, state_tables, results_list) 
+# tab <- tab_allstates_billions(results_list, refnum=2, runtype="reform_beh")
+
+save_states <- function(tab, refnum, runtype, fnsuffix){
+  # configure save settings for wide table
+  folder_name <- paste0(runtype, refnum)
+  dir.create(file.path(here::here("results", folder_name)), showWarnings = FALSE)
+  fname <- paste0(folder_name, fnsuffix)
+  print(fname)
+  # zoom 2 default
+  gtsave(tab, fname, path = here::here("results", folder_name), zoom=2, vwidth=1500) 
+}
+
+# configure save settings for wide table
+# gtsave(tab, "states_ranked_table.png", path = here::here(runresults), zoom=2, vwidth=1500)  # zoom 2 default
+# write_csv(tabdata, here::here(runresults, "states_ranked_table_data.csv"))
+
 
 ```
 
-```{r uscombined_table, include=TRUE}
+```{r loop_state_tables}
+# tab <- tab_allstates_billions(results_list, refnum=2, runtype="reform_beh")
+# fnsuffix  <- "_USImpact_combined_table.png"
+
+state_tables <- function(refnum, 
+                         results_list, 
+                         runtype,
+                         fnsuffix="_StatesImpact_combined_table.png"){
+  print(paste0("Getting & saving state tables for reform #: ", refnum, ", runtype=", runtype))
+  tab <- tab_allstates_billions(results_list, refnum, runtype)
+  save_states(tab, refnum, runtype, fnsuffix)
+}
+
+# refnum <- 1
+purrr::map(1:13, state_tables, results_list, "reform")
+purrr::map(1:13, state_tables, results_list, "reform_beh")
+
+```
+
+
+```{r OLDITHINK_uscombined_table, include=TRUE}
 
 reform_name <- reform_descriptions %>%
   filter(number==refnum) %>% .$description
